@@ -8,27 +8,29 @@ from datetime import datetime
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 
-# ===== 数据源（全部使用备用 RSSHub 实例）=====
+# ===== 数据源配置 =====
+# 对于支持官方 JSON 接口的，type 设为 "api"，url 填请求地址
+# 其他平台仍走 RSSHub 备用实例
 SOURCES = [
     {
         "name": "微博热搜",
-        "type": "rsshub",
-        "url": "https://rsshub.pseudoyu.com/weibo/search/hot"
+        "type": "api",
+        "url": "https://weibo.com/ajax/side/hotSearch"
     },
     {
         "name": "知乎热榜",
-        "type": "rsshub",
-        "url": "https://rsshub.pseudoyu.com/zhihu/hotlist"
+        "type": "api",
+        "url": "https://www.zhihu.com/api/v3/feed/topstory/hot-lists/total?limit=20"
+    },
+    {
+        "name": "B站热门",
+        "type": "api",
+        "url": "https://api.bilibili.com/x/web-interface/popular?ps=20"
     },
     {
         "name": "百度热搜",
         "type": "rsshub",
         "url": "https://rsshub.pseudoyu.com/baidu/top"
-    },
-    {
-        "name": "B站热门",
-        "type": "rsshub",
-        "url": "https://rsshub.pseudoyu.com/bilibili/hot-search"
     },
     {
         "name": "抖音热点",
@@ -57,11 +59,75 @@ SOURCES = [
     }
 ]
 
-def fetch_rsshub(name, url):
-    """通过 RSSHub 抓取，增加 User-Agent"""
+def fetch_weibo():
+    """微博官方 JSON 接口"""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        # 关键：添加 agent 参数模拟浏览器
-        feed = feedparser.parse(url, agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        resp = requests.get("https://weibo.com/ajax/side/hotSearch", headers=headers, timeout=10)
+        data = resp.json()
+        items = data.get("data", {}).get("realtime", [])
+        trends = []
+        for idx, item in enumerate(items[:20]):
+            word = item.get("word", "")
+            trends.append({
+                "title": word,
+                "link": f"https://s.weibo.com/weibo?q={requests.utils.quote(word)}",
+                "summary": f"热搜第{idx+1}位"
+            })
+        print(f"  ✅ 已获取 {len(trends)} 条微博热搜")
+        return trends
+    except Exception as e:
+        print(f"  ❌ 微博抓取失败: {e}")
+        return []
+
+def fetch_zhihu():
+    """知乎官方热榜接口"""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        resp = requests.get("https://www.zhihu.com/api/v3/feed/topstory/hot-lists/total?limit=20", headers=headers, timeout=10)
+        data = resp.json()
+        items = data.get("data", [])
+        trends = []
+        for item in items:
+            # 知乎热榜 API 返回的结构，有时不同，需取 target 字段
+            target = item.get("target", {})
+            title = target.get("title", "")
+            url = target.get("url", "")
+            if not url:
+                url = f"https://www.zhihu.com/question/{target.get('id', '')}"
+            trends.append({"title": title, "link": url, "summary": f"热度: {item.get('detail_text', '')}"})
+        print(f"  ✅ 已获取 {len(trends)} 条知乎热榜")
+        return trends
+    except Exception as e:
+        print(f"  ❌ 知乎抓取失败: {e}")
+        return []
+
+def fetch_bilibili():
+    """B站官方热门接口"""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        resp = requests.get("https://api.bilibili.com/x/web-interface/popular?ps=20", headers=headers, timeout=10)
+        data = resp.json()
+        items = data.get("data", {}).get("list", []) or data.get("data", [])
+        trends = []
+        for item in items:
+            title = item.get("title", "")
+            bvid = item.get("bvid", "")
+            trends.append({
+                "title": title,
+                "link": f"https://www.bilibili.com/video/{bvid}",
+                "summary": f"播放量：{item.get('stat', {}).get('view', '')}"
+            })
+        print(f"  ✅ 已获取 {len(trends)} 条 B站热门")
+        return trends
+    except Exception as e:
+        print(f"  ❌ B站抓取失败: {e}")
+        return []
+
+def fetch_rsshub(name, url):
+    """通过 RSSHub 抓取（备用实例）"""
+    try:
+        feed = feedparser.parse(url, agent="Mozilla/5.0")
         trends = []
         for entry in feed.entries[:20]:
             trends.append({
@@ -76,12 +142,20 @@ def fetch_rsshub(name, url):
         return []
 
 def fetch_all_trends():
+    """汇总：先官方接口，再 RSSHub"""
     all_trends = []
+    # 先抓取有官方接口的平台
+    all_trends.extend(fetch_weibo())
+    all_trends.extend(fetch_zhihu())
+    all_trends.extend(fetch_bilibili())
+    # 再抓取 RSSHub 平台
     for src in SOURCES:
-        trends = fetch_rsshub(src["name"], src["url"])
-        all_trends.extend(trends)
+        if src["type"] == "rsshub":
+            trends = fetch_rsshub(src["name"], src["url"])
+            all_trends.extend(trends)
     return all_trends
 
+# ---------- DeepSeek 整理与页面生成（同方案二，未改动）----------
 def summarize_with_deepseek(trend_list):
     if not trend_list:
         return "<p>今日暂无热门数据。</p>"
