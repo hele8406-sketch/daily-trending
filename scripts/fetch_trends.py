@@ -5,84 +5,63 @@ import re
 import sys
 from datetime import datetime
 
-# ===== DeepSeek 配置 =====
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 
-# ===== 数据源定义 =====
+# ===== 数据源（全部使用备用 RSSHub 实例）=====
 SOURCES = [
     {
         "name": "微博热搜",
-        "type": "weibo",
-        "url": "https://weibo.com/ajax/side/hotSearch"
+        "type": "rsshub",
+        "url": "https://rsshub.pseudoyu.com/weibo/search/hot"
     },
     {
         "name": "知乎热榜",
         "type": "rsshub",
-        "url": "https://rsshub.app/zhihu/hotlist"
+        "url": "https://rsshub.pseudoyu.com/zhihu/hotlist"
     },
     {
         "name": "百度热搜",
         "type": "rsshub",
-        "url": "https://rsshub.app/baidu/top"
+        "url": "https://rsshub.pseudoyu.com/baidu/top"
     },
     {
         "name": "B站热门",
         "type": "rsshub",
-        "url": "https://rsshub.app/bilibili/hot-search"
+        "url": "https://rsshub.pseudoyu.com/bilibili/hot-search"
     },
     {
         "name": "抖音热点",
         "type": "rsshub",
-        "url": "https://rsshub.app/douyin/hot"
+        "url": "https://rsshub.pseudoyu.com/douyin/hot"
     },
     {
         "name": "头条热榜",
         "type": "rsshub",
-        "url": "https://rsshub.app/toutiao/hot"
+        "url": "https://rsshub.pseudoyu.com/toutiao/hot"
     },
     {
         "name": "豆瓣小组精选",
         "type": "rsshub",
-        "url": "https://rsshub.app/douban/group/explore"
+        "url": "https://rsshub.pseudoyu.com/douban/group/explore"
     },
     {
         "name": "贴吧热议",
         "type": "rsshub",
-        "url": "https://rsshub.app/tieba/hot"
+        "url": "https://rsshub.pseudoyu.com/tieba/hot"
     },
     {
         "name": "TikTok 热搜",
         "type": "rsshub",
-        "url": "https://rsshub.app/tiktok/hot"
+        "url": "https://rsshub.pseudoyu.com/tiktok/hot"
     }
 ]
 
-def fetch_weibo_trends():
-    """抓取微博热搜（官方非公开 JSON 接口）"""
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    try:
-        resp = requests.get("https://weibo.com/ajax/side/hotSearch", headers=headers, timeout=10)
-        data = resp.json()
-        items = data.get("data", {}).get("realtime", [])
-        trends = []
-        for idx, item in enumerate(items[:20]):
-            word = item.get("word", "")
-            trends.append({
-                "title": word,
-                "link": f"https://s.weibo.com/weibo?q={requests.utils.quote(word)}",
-                "summary": f"热搜第{idx+1}位"
-            })
-        print(f"  ✅ 已获取 {len(trends)} 条微博热搜")
-        return trends
-    except Exception as e:
-        print(f"  ❌ 微博热搜抓取失败: {e}")
-        return []
-
 def fetch_rsshub(name, url):
-    """通过 RSSHub 抓取热门"""
+    """通过 RSSHub 抓取，增加 User-Agent"""
     try:
-        feed = feedparser.parse(url)
+        # 关键：添加 agent 参数模拟浏览器
+        feed = feedparser.parse(url, agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         trends = []
         for entry in feed.entries[:20]:
             trends.append({
@@ -97,26 +76,16 @@ def fetch_rsshub(name, url):
         return []
 
 def fetch_all_trends():
-    """汇总所有平台热门"""
     all_trends = []
     for src in SOURCES:
-        if src["type"] == "weibo":
-            trends = fetch_weibo_trends()
-        else:
-            trends = fetch_rsshub(src["name"], src["url"])
+        trends = fetch_rsshub(src["name"], src["url"])
         all_trends.extend(trends)
     return all_trends
 
 def summarize_with_deepseek(trend_list):
-    """调用 DeepSeek 生成 HTML 片段"""
     if not trend_list:
         return "<p>今日暂无热门数据。</p>"
-
-    # 拼接成文本
-    text = ""
-    for t in trend_list[:80]:  # 控制总量，节省 token
-        text += f"- [{t['title']}]({t['link']})（{t['summary']}）\n"
-
+    text = "\n".join([f"- [{t['title']}]({t['link']})（{t['summary']}）" for t in trend_list[:80]])
     prompt = f"""你是一个专业的内容编辑。请根据以下各平台热门话题列表，生成一份「今日全网热门话题速览」。
 要求：
 1. 挑选各平台最具代表性的 5-8 个话题进行介绍。
@@ -126,50 +95,41 @@ def summarize_with_deepseek(trend_list):
 5. 输出严格 HTML 片段，不要包含 ```html``` 标记。
 格式参考：
 <p>【今日热点总览】……</p>
-<h2>🔥 微博热搜</h2>
+<h2>🔥 平台名</h2>
 <ul>
   <li><a href="链接">话题名</a> – 简要说明</li>
   ...
 </ul>
-…
+……
 
 话题列表：
 {text}"""
-
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
     data = {
         "model": "deepseek-chat",
         "messages": [
-            {"role": "system", "content": "你是一个严谨的编辑，只输出 HTML 片段，不额外说明。"},
+            {"role": "system", "content": "你是一个严谨的编辑，只输出HTML片段，不额外说明。"},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.5,
         "max_tokens": 2500
     }
-
     print("  正在请求 DeepSeek API...")
     try:
         resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=data, timeout=30)
         resp.raise_for_status()
         result = resp.json()
         if "choices" not in result:
-            print("  ❌ API 返回异常：" + str(result))
             return "<p class='error'>AI 返回数据异常，请稍后重试。</p>"
         raw = result["choices"][0]["message"]["content"]
     except Exception as e:
         print(f"  ❌ DeepSeek 调用失败: {e}")
         return "<p class='error'>AI 服务暂时不可用。</p>"
-
-    # 清洗可能的 markdown 标记
     cleaned = re.sub(r'^```html\s*', '', raw, flags=re.IGNORECASE)
     cleaned = re.sub(r'\s*```$', '', cleaned)
     return cleaned.strip()
 
 def build_html(summary_html):
-    """包装成完整的 HTML 页面"""
     today = datetime.now().strftime("%Y年%m月%d日")
     update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return f"""<!DOCTYPE html>
@@ -210,15 +170,11 @@ def build_html(summary_html):
 
 def main():
     print(f"🚀 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 启动热门话题收集...")
-
     if not DEEPSEEK_API_KEY:
-        print("❌ 致命错误：DEEPSEEK_API_KEY 环境变量未设置！")
-        print("请确认在仓库 Secrets 中已添加名为 DEEPSEEK_API_KEY 的密钥。")
+        print("❌ 致命错误：DEEPSEEK_API_KEY 未设置！")
         sys.exit(1)
-
     trends = fetch_all_trends()
     print(f"📊 共获取 {len(trends)} 条话题")
-
     if len(trends) == 0:
         error_html = "<p class='error'>今日未能获取到任何热门话题，可能接口临时不可用，明日将自动重试。</p>"
         full_html = build_html(error_html)
@@ -227,7 +183,6 @@ def main():
         summary_html = summarize_with_deepseek(trends)
         print("🎨 构建完整页面...")
         full_html = build_html(summary_html)
-
     os.makedirs("docs", exist_ok=True)
     with open("docs/index.html", "w", encoding="utf-8") as f:
         f.write(full_html)
